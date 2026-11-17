@@ -6,13 +6,14 @@ import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 
 import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
+import javax.crypto.SecretKey;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.security.Signature;
 import java.util.Base64;
 import java.util.HashMap;
@@ -22,13 +23,16 @@ import java.util.concurrent.Executors;
 /**
  * UNSECURED / VULNERABLE WEBSERVER (Default Port 8081).
  *
- * Demonstrates common JWT vulnerabilities and legacy library design flaws:
+ * Demonstrates authentic vulnerabilities found in legacy systems and unpatched libraries:
  * 1. "alg": "none" signature stripping bypass (CVE-2022-23540).
- * 2. Algorithm confusion (RS256 vs HS256 using public RSA key bytes as HMAC secret, CVE-2022-29217).
- * 3. Confused Deputy / Cross-Service Substitution (Missing 'aud' & 'typ' checks, RFC 8725 §2.4).
- * 4. Unverified 'kid' Path Traversal to /dev/null allowing empty-key HMAC forge (RFC 8725 §2.5).
- * 5. Expired token acceptance (skipping 'exp' claim check).
- * 6. Naive split(".") vulnerable to delimiter allocation floods (CVE-2025-27144).
+ * 2. Algorithm confusion: failure to bind key type to algorithm; evaluates public RSA key bytes
+ *    as an HMAC secret (CVE-2022-29217 / CVE-2024-33663).
+ * 3. Confused Deputy / Cross-Service Substitution: verifies signature but completely omits
+ *    audience ('aud') and token type ('typ') validation (RFC 8725 §2.4).
+ * 4. Unverified 'kid' Path Traversal: resolves key files directly from disk using the raw 'kid'
+ *    header without path sanitization; reading empty files yields an empty HMAC secret (RFC 8725 §2.5).
+ * 5. Missing expiration validation: completely skips checking the 'exp' claim, allowing indefinite replay.
+ * 6. Naive split(".") parsing without delimiter or payload length limits (CVE-2025-27144).
  */
 public class UnsecuredServer {
 
@@ -36,9 +40,163 @@ public class UnsecuredServer {
     private final int port;
     private HttpServer server;
 
+    // Keys directory for file-based key lookup
+    private static final File KEY_STORE_DIR;
+
+    static {
+        KEY_STORE_DIR = new File(System.getProperty("java.io.tmpdir"), "jwt-unsecured-keys");
+        KEY_STORE_DIR.mkdirs();
+        // Populate standard valid key file
+        try {
+            File defaultKeyFile = new File(KEY_STORE_DIR, KeyManager.KEY_ID);
+            Files.write(defaultKeyFile.toPath(), KeyManager.getPublicKeyDerBytes());
+        } catch (IOException ignored) {}
+    }
+
     public UnsecuredServer(int port) {
         this.port = port;
     }
+
+    /**
+     * Authentic vulnerable token verification method.
+     * Contains the genuine logical and architectural defects documented in RFC 8725.
+     */
+    public static VerificationResult verifyToken(String authHeader) throws Exception {
+        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+            throw new SecurityException("Missing or invalid Authorization header");
+        }
+
+        String rawToken = authHeader.substring(7).trim();
+
+        // VULNERABILITY 6: Naive split without checking dot count or length
+        String[] parts = rawToken.split("\\.", -1);
+        if (parts.length < 2) {
+            throw new IllegalArgumentException("Malformed JWT structure: missing parts");
+        }
+
+        String headerJson = new String(Base64.getUrlDecoder().decode(parts[0]), StandardCharsets.UTF_8);
+        String payloadJson = new String(Base64.getUrlDecoder().decode(parts[1]), StandardCharsets.UTF_8);
+
+        Map<String, String> headerMap = parseSimpleJson(headerJson);
+        Map<String, String> payloadMap = parseSimpleJson(payloadJson);
+
+        String alg = headerMap.getOrDefault("alg", "none");
+        String kid = headerMap.get("kid");
+        String signatureBase64 = parts.length > 2 ? parts[2] : "";
+        String signingInput = parts[0] + "." + parts[1];
+
+        boolean signatureValid = false;
+        String exploitType = null;
+
+        // VULNERABILITY 1: "alg": "none" signature stripping bypass
+        if ("none".equalsIgnoreCase(alg)) {
+            // Unsecured parser accepts unsigned tokens
+            signatureValid = true;
+            exploitType = "ALG_NONE_BYPASS";
+        }
+        // VULNERABILITY 4: 'kid' header path traversal to disk
+        // Resolves key directly from disk without sanitizing 'kid' (e.g. /dev/null or ../)
+        else if (kid != null) {
+            byte[] resolvedKeyBytes = loadKeyFromDisk(kid);
+            if (resolvedKeyBytes != null) {
+                // If caller requested HMAC, verify with resolved key bytes
+                if ("HS256".equalsIgnoreCase(alg)) {
+                    signatureValid = verifyHmacSha256(signingInput, signatureBase64, resolvedKeyBytes);
+                    if (signatureValid) {
+                        exploitType = "KID_PATH_TRAVERSAL_EMPTY_KEY";
+                    }
+                }
+            }
+        }
+
+        // VULNERABILITY 2: Algorithm Confusion (RS256 -> HS256)
+        // If kid was not resolved or if normal algorithm confusion is attempted:
+        // The server expects to verify with its RSA public key, but caller requests HS256!
+        // The verifier fails to bind key type and evaluates the RSA public key bytes as the HMAC secret!
+        if (!signatureValid && "HS256".equalsIgnoreCase(alg)) {
+            byte[] rsaPubDer = KeyManager.getPublicKeyDerBytes();
+            byte[] rsaPubPem = KeyManager.getPublicKeyPem().getBytes(StandardCharsets.UTF_8);
+
+            if (verifyHmacSha256(signingInput, signatureBase64, rsaPubDer) ||
+                verifyHmacSha256(signingInput, signatureBase64, rsaPubPem)) {
+                signatureValid = true;
+                exploitType = "ALGORITHM_CONFUSION_RS256_TO_HS256";
+            }
+        }
+
+        // Standard RS256 verification
+        if (!signatureValid && "RS256".equalsIgnoreCase(alg)) {
+            Signature rsaSig = Signature.getInstance("SHA256withRSA");
+            rsaSig.initVerify(KeyManager.getPublicKey());
+            rsaSig.update(signingInput.getBytes(StandardCharsets.US_ASCII));
+            byte[] sigBytes = Base64.getUrlDecoder().decode(signatureBase64);
+            signatureValid = rsaSig.verify(sigBytes);
+        }
+
+        if (!signatureValid) {
+            throw new SecurityException("Invalid cryptographic signature");
+        }
+
+        // VULNERABILITY 5: Skipping 'exp' expiration claim check
+        // Real legacy vulnerability: parses claims but forgets to call claims.getExpirationTime().before(now)
+        if (payloadMap.containsKey("exp") && exploitType == null) {
+            long exp = Long.parseLong(payloadMap.get("exp"));
+            long now = System.currentTimeMillis() / 1000;
+            if (exp < now) {
+                exploitType = "EXPIRED_TOKEN_ACCEPTED";
+            }
+        }
+
+        // VULNERABILITY 3: Confused Deputy - skips 'aud' and 'typ' checks!
+        // Accepts any token with a valid signature regardless of target service
+        String aud = payloadMap.getOrDefault("aud", "");
+        if (!"secured-admin-api".equals(aud) && exploitType == null) {
+            exploitType = "CONFUSED_DEPUTY_AUDIENCE_IGNORED";
+        }
+
+        return new VerificationResult(payloadMap, headerMap, exploitType);
+    }
+
+    /**
+     * Genuine file-based key loader vulnerable to path traversal.
+     * Takes raw 'kid' without sanitization and resolves it against KEY_STORE_DIR.
+     */
+    private static byte[] loadKeyFromDisk(String kid) {
+        try {
+            File file = kid.startsWith("/")
+                ? new File(kid)
+                : new File(KEY_STORE_DIR, kid).toPath().normalize().toFile();
+            if (file.exists() && !file.isDirectory()) {
+                try (FileInputStream fis = new FileInputStream(file)) {
+                    return fis.readAllBytes();
+                }
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    private static boolean verifyHmacSha256(String data, String signatureB64, byte[] keyBytes) {
+        try {
+            SecretKey secretKey = new SecretKey() {
+                @Override public String getAlgorithm() { return "HmacSHA256"; }
+                @Override public String getFormat() { return "RAW"; }
+                @Override public byte[] getEncoded() { return keyBytes; }
+            };
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(secretKey);
+            byte[] expectedSig = mac.doFinal(data.getBytes(StandardCharsets.US_ASCII));
+            String expectedSigB64 = Base64.getUrlEncoder().withoutPadding().encodeToString(expectedSig);
+            return expectedSigB64.equals(signatureB64);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    public record VerificationResult(
+        Map<String, String> claims,
+        Map<String, String> headers,
+        String exploitDetected
+    ) {}
 
     public void start() throws IOException {
         server = HttpServer.create(new InetSocketAddress(port), 0);
@@ -116,126 +274,16 @@ public class UnsecuredServer {
             }
 
             String authHeader = exchange.getRequestHeaders().getFirst("Authorization");
-            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-                sendError(exchange, 401, "Missing or invalid Authorization header");
-                return;
-            }
-
-            String rawToken = authHeader.substring(7).trim();
 
             try {
-                // VULNERABILITY 6: Naive split without checking dot count or length
-                String[] parts = rawToken.split("\\.", -1);
-                if (parts.length < 2) {
-                    sendError(exchange, 400, "Malformed JWT structure");
-                    return;
-                }
+                VerificationResult result = verifyToken(authHeader);
 
-                String headerJson = new String(Base64.getUrlDecoder().decode(parts[0]), StandardCharsets.UTF_8);
-                String payloadJson = new String(Base64.getUrlDecoder().decode(parts[1]), StandardCharsets.UTF_8);
+                String sub = result.claims().getOrDefault("sub", "anonymous");
+                String role = result.claims().getOrDefault("role", "user");
+                String aud = result.claims().getOrDefault("aud", "none");
+                String alg = result.headers().getOrDefault("alg", "none");
+                String exploit = result.exploitDetected() != null ? result.exploitDetected() : "NONE_VALID_AUTHENTICATION";
 
-                Map<String, String> headerMap = parseSimpleJson(headerJson);
-                Map<String, String> payloadMap = parseSimpleJson(payloadJson);
-
-                String alg = headerMap.getOrDefault("alg", "none");
-                String kid = headerMap.get("kid");
-                String signatureBase64 = parts.length > 2 ? parts[2] : "";
-
-                String signingInput = parts[0] + "." + parts[1];
-                boolean signatureValid = false;
-                String exploitReason = "";
-
-                // VULNERABILITY 1: "alg": "none" signature stripping bypass
-                if ("none".equalsIgnoreCase(alg)) {
-                    // Accepts unsigned token!
-                    signatureValid = true;
-                    exploitReason = "VULNERABILITY: 'alg': 'none' accepted without cryptographic signature!";
-                    System.out.println("[UnsecuredServer] " + exploitReason);
-                }
-                // VULNERABILITY 4: 'kid' path traversal (/dev/null empty key)
-                else if (kid != null && (kid.contains("/dev/null") || kid.contains("../"))) {
-                    File file = new File(kid);
-                    byte[] keyBytes = new byte[0];
-                    if (file.exists() && file.isFile()) {
-                        try (FileInputStream fis = new FileInputStream(file)) {
-                            keyBytes = fis.readAllBytes();
-                        }
-                    }
-                    final byte[] fKeyBytes = keyBytes;
-                    javax.crypto.SecretKey secretKey = new javax.crypto.SecretKey() {
-                        @Override public String getAlgorithm() { return "HmacSHA256"; }
-                        @Override public String getFormat() { return "RAW"; }
-                        @Override public byte[] getEncoded() { return fKeyBytes; }
-                    };
-                    Mac mac = Mac.getInstance("HmacSHA256");
-                    mac.init(secretKey);
-                    byte[] expectedSig = mac.doFinal(signingInput.getBytes(StandardCharsets.US_ASCII));
-                    String expectedSigB64 = Base64.getUrlEncoder().withoutPadding().encodeToString(expectedSig);
-                    if (expectedSigB64.equals(signatureBase64)) {
-                        signatureValid = true;
-                        exploitReason = "VULNERABILITY: 'kid' path traversal (" + kid + ") resolved to empty key; verified with empty HMAC!";
-                        System.out.println("[UnsecuredServer] " + exploitReason);
-                    }
-                }
-                // VULNERABILITY 2: Algorithm Confusion (RS256 -> HS256 with public key bytes)
-                else if ("HS256".equalsIgnoreCase(alg)) {
-                    // Server has an RSA public key, but caller sent HS256!
-                    // Vulnerable verifier uses the RSA public key bytes (or PEM bytes) as the HMAC key!
-                    byte[] rsaPubDer = KeyManager.getPublicKeyDerBytes();
-                    byte[] rsaPubPem = KeyManager.getPublicKeyPem().getBytes(StandardCharsets.UTF_8);
-
-                    Mac macDer = Mac.getInstance("HmacSHA256");
-                    macDer.init(new SecretKeySpec(rsaPubDer, "HmacSHA256"));
-                    byte[] expectedSigDer = macDer.doFinal(signingInput.getBytes(StandardCharsets.US_ASCII));
-                    String expectedSigDerB64 = Base64.getUrlEncoder().withoutPadding().encodeToString(expectedSigDer);
-
-                    Mac macPem = Mac.getInstance("HmacSHA256");
-                    macPem.init(new SecretKeySpec(rsaPubPem, "HmacSHA256"));
-                    byte[] expectedSigPem = macPem.doFinal(signingInput.getBytes(StandardCharsets.US_ASCII));
-                    String expectedSigPemB64 = Base64.getUrlEncoder().withoutPadding().encodeToString(expectedSigPem);
-
-                    if (expectedSigDerB64.equals(signatureBase64) || expectedSigPemB64.equals(signatureBase64)) {
-                        signatureValid = true;
-                        exploitReason = "VULNERABILITY: Algorithm Confusion! Verified HS256 HMAC using public RSA key bytes as secret!";
-                        System.out.println("[UnsecuredServer] " + exploitReason);
-                    }
-                }
-                // Standard RS256 verification
-                else if ("RS256".equalsIgnoreCase(alg)) {
-                    Signature rsaSig = Signature.getInstance("SHA256withRSA");
-                    rsaSig.initVerify(KeyManager.getPublicKey());
-                    rsaSig.update(signingInput.getBytes(StandardCharsets.US_ASCII));
-                    byte[] sigBytes = Base64.getUrlDecoder().decode(signatureBase64);
-                    signatureValid = rsaSig.verify(sigBytes);
-                }
-
-                if (!signatureValid) {
-                    sendError(exchange, 401, "Invalid token signature");
-                    return;
-                }
-
-                // VULNERABILITY 5: Skipping 'exp' (expiration) check
-                // Even if expired, continues!
-                if (payloadMap.containsKey("exp")) {
-                    long exp = Long.parseLong(payloadMap.get("exp"));
-                    long now = System.currentTimeMillis() / 1000;
-                    if (exp < now && exploitReason.isEmpty()) {
-                        exploitReason = "VULNERABILITY: Token expired " + (now - exp) + " seconds ago, but server does NOT validate 'exp' claim!";
-                        System.out.println("[UnsecuredServer] " + exploitReason);
-                    }
-                }
-
-                // VULNERABILITY 3: Confused Deputy - skips 'aud' and 'typ' checks!
-                String role = payloadMap.getOrDefault("role", "user");
-                String aud = payloadMap.getOrDefault("aud", "none");
-                String sub = payloadMap.getOrDefault("sub", "anonymous");
-
-                if (!"secured-admin-api".equals(aud) && exploitReason.isEmpty()) {
-                    exploitReason = "VULNERABILITY: Confused Deputy! Token audience was '" + aud + "', but server skipped 'aud'/'typ' check!";
-                    System.out.println("[UnsecuredServer] " + exploitReason);
-                }
-
-                // Grant access if role is admin OR if attacker exploited confused deputy / forgery
                 String responseJson = String.format("""
                     {
                         "status": "EXPLOITED_OR_AUTHENTICATED",
@@ -255,12 +303,15 @@ public class UnsecuredServer {
                         }
                     }
                     """,
-                    exploitReason.isEmpty() ? "Standard valid token accepted" : exploitReason.replace("\"", "\\\""),
-                    sub, role, aud, alg
+                    exploit, sub, role, aud, alg
                 );
 
                 sendResponse(exchange, 200, responseJson);
 
+            } catch (SecurityException se) {
+                sendError(exchange, 401, se.getMessage());
+            } catch (IllegalArgumentException iae) {
+                sendError(exchange, 400, iae.getMessage());
             } catch (Exception e) {
                 sendError(exchange, 500, "Error processing token: " + e.getMessage());
             }
