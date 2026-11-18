@@ -1,4 +1,4 @@
-# JWT Vulnerability & Defense Laboratory (RFC 8725 / BCP 225)
+# JWT Security review
 
 A lightweight Java demonstration showcasing critical JSON Web Token (JWT) vulnerabilities, library compromises, and defense-in-depth implementations conforming to **RFC 8725** (*JSON Web Token Best Current Practices*), **draft-ietf-oauth-rfc8725bis-10**, and **RFC 9068**.
 
@@ -20,7 +20,8 @@ This repository provides two independent servers running side-by-side:
 | **4** | **`kid` Path Traversal / Injection** | RFC 8725 §2.5, §3.10 | Reads `/dev/null` from file loader (0 bytes); verifies forged token with empty secret. | Regex check `^[a-zA-Z0-9_-]{1,64}$` and in-memory key lookup only. |
 | **5** | **Expired Token Replay Attack** | RFC 8725 §1.2, §3.8 | Skips `exp` validation, allowing replayed stolen bearer tokens indefinitely. | Strict `exp` validation with maximum 30-second clock skew. |
 | **6** | **Delimiter Flood Pre-Parse DoS** | CVE-2025-27144<br>RFC 8725bis §3.14 | Naively splits on `.` without limits, causing parser memory exhaustion. | Enforces 4,096-byte header ceiling and asserts period count == 2 before split. |
-| **7** | **Baseline Legitimate Request** | RFC 8725 / RFC 9068 | Authenticates valid token. | Authenticates and authorizes valid RFC 8725 access token. |
+| **7** | **Embedded JWK Key Injection** | CVE-2018-0114<br>RFC 8725 §3.10 | Trusts inline public key from attacker inside `jwk` header (`jwt_tool -X i`). | Explicitly drops dynamic headers (`jwk`, `jku`, `x5u`); keys only from local JWKS. |
+| **8** | **Baseline Legitimate Request** | RFC 8725 / RFC 9068 | Authenticates valid token. | Authenticates and authorizes valid RFC 8725 access token. |
 
 ---
 
@@ -93,7 +94,18 @@ curl -i -H "Authorization: Bearer $TOKEN" http://localhost:8081/api/admin/data
 curl -i -H "Authorization: Bearer $TOKEN" http://localhost:8082/api/admin/data
 ```
 
-### 4. Test Delimiter Flood Pre-Parse DoS
+### 4. Test Embedded JWK Key Injection (jwt_tool -X i)
+```bash
+TOKEN=$(curl -s "http://localhost:8080/api/generate-token?type=embedded-jwk" | grep -o '"raw_token": "[^"]*' | cut -d'"' -f4)
+
+# 4a. Unsecured Server: 200 OK (Trusts attacker-supplied key inside token)
+curl -i -H "Authorization: Bearer $TOKEN" http://localhost:8081/api/admin/data
+
+# 4b. Secured Server: 401 Unauthorized (Dynamic jwk headers forbidden)
+curl -i -H "Authorization: Bearer $TOKEN" http://localhost:8082/api/admin/data
+```
+
+### 5. Test Delimiter Flood Pre-Parse DoS
 ```bash
 TOKEN=$(curl -s "http://localhost:8080/api/generate-token?type=delimiter-flood" | grep -o '"raw_token": "[^"]*' | cut -d'"' -f4)
 

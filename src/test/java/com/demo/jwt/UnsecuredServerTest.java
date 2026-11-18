@@ -64,4 +64,15 @@ public class UnsecuredServerTest {
         assertEquals("admin", result.claims().get("role"));
         assertEquals("EXPIRED_TOKEN_ACCEPTED", result.exploitDetected());
     }
+
+    @Test
+    @DisplayName("Vulnerability 6: Embedded JWK Key Injection accepted (CVE-2018-0114 / jwt_tool -X i)")
+    void testEmbeddedJwkAccepted() throws Exception {
+        String token = AttackTokenGenerator.createEmbeddedJwkToken("attacker", "admin");
+        UnsecuredServer.VerificationResult result = UnsecuredServer.verifyToken("Bearer " + token);
+
+        assertNotNull(result);
+        assertEquals("admin", result.claims().get("role"));
+        assertEquals("EMBEDDED_JWK_KEY_INJECTION", result.exploitDetected());
+    }
 }

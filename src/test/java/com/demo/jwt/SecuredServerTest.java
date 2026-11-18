@@ -72,6 +72,16 @@ public class SecuredServerTest {
     }
 
     @Test
+    @DisplayName("Defense 7: Embedded JWK Key Injection strictly rejected (RFC 8725 §3.10 / jwt_tool -X i)")
+    void testEmbeddedJwkRejected() {
+        String token = AttackTokenGenerator.createEmbeddedJwkToken("attacker", "admin");
+        SecurityException ex = assertThrows(SecurityException.class, () ->
+            SecuredServer.verifyToken("Bearer " + token)
+        );
+        assertTrue(ex.getMessage().contains("jwk") || ex.getMessage().contains("Dynamic"));
+    }
+
+    @Test
     @DisplayName("Baseline: Legitimate RFC 8725 & RFC 9068 admin token is successfully authenticated and authorized")
     void testLegitimateTokenAccepted() throws Exception {
         String token = AttackTokenGenerator.createValidSecuredToken("alice-admin", "admin");

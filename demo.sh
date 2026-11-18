@@ -163,6 +163,7 @@ function run_all_tests() {
     run_single_test "kid-traversal" "Unverified 'kid' Path Traversal to /dev/null" "RFC 8725 §3.10"
     run_single_test "expired" "Expired Token Replay Attack" "RFC 8725 §3.8"
     run_single_test "delimiter-flood" "Delimiter Flood Pre-Parse DoS" "CVE-2025-27144 / RFC 8725bis §3.14"
+    run_single_test "embedded-jwk" "Embedded JWK Key Injection (jwt_tool -X i)" "CVE-2018-0114 / RFC 8725 §3.10"
     run_single_test "valid" "Baseline Legitimate Access Token" "RFC 8725 / RFC 9068 Compliant"
 
     echo -e "\n${CYAN}======================================================================${NC}"

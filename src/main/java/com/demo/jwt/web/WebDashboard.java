@@ -138,6 +138,12 @@ public class WebDashboard {
                         cveReference = "CVE-2025-27144 / RFC 8725bis §3.14";
                         description = "Authorization header packed with 5,000 dots. Causes naive split('.') parsers to exhaust memory or crash.";
                     }
+                    case "embedded-jwk" -> {
+                        token = AttackTokenGenerator.createEmbeddedJwkToken("attacker-agent", "admin");
+                        attackName = "Attack 7: Embedded JWK Key Injection (jwt_tool -X i)";
+                        cveReference = "CVE-2018-0114 / RFC 8725 §3.10";
+                        description = "Embeds an attacker-generated public key in the 'jwk' header. Vulnerable servers verify against the embedded key instead of a trusted key store.";
+                    }
                     default -> {
                         token = AttackTokenGenerator.createValidSecuredToken("alice-admin", "admin");
                         attackName = "Baseline: Legitimate RFC 8725 Admin Token";
